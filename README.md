@@ -9,10 +9,9 @@ I figured a web-server would be a good starting point as the following concepts 
 * importing libraries (i plan to use at least the following)
   - command-line parsing/switches
   - yaml parser (maybe even .properties to allow user preference?)
-* properties-file usage
 
 ## Features
-Who knows that the final product will look like, but I expect to follow an Apache-style application.
+Who knows what the final product will look like, but I expect to follow an Apache-style application.
 That is, a pure web-server, as opposed to an application server (like Tomcat or NodeJS).
 It will have an entry point from which to stream back static content.
 It will also support a configurable proxy file (a la mod_proxy) where backing servers of anytype can be forwarded requests to and their responses returned.
