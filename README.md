@@ -1,6 +1,7 @@
 # Web-Server
 ## Concept
-The idea behind this repository is simply to learn GoLang.  I figured a web-server would be a good starting point as the following concepts are involved:
+The idea behind this repository is simply to learn GoLang.  If anybody actually looks at this and has any feedback, then hey - send it on.
+I figured a web-server would be a good starting point as the following concepts are involved:
 * building an executable
 * threading
 * streams
