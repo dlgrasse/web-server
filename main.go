@@ -1,15 +1,15 @@
 package main
 
 import (
-	"fmt"
-	"os"
-	"strings"
 	"bytes"
+	"fmt"
 	"io"
 	"mime"
 	"net"
-	"strconv"
+	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 )
 
 func main() {
@@ -43,29 +43,29 @@ func handleConnection(conn net.Conn, config configMap) {
 		startLine, slErr := parseStartLine(conn)
 		if slErr != nil {
 			processError(conn, slErr)
-			break;
+			break
 		}
 		proxyProcessed, pErr := doProxy(conn, startLine, config)
 		if pErr != nil {
 			processError(conn, pErr)
-			break;
+			break
 		}
-		if (!proxyProcessed) {
+		if !proxyProcessed {
 			headers, hErr := parseHeaders(conn)
 			if hErr != nil {
 				processError(conn, hErr)
-				break;
+				break
 			}
 			_, bErr := parseBody(conn, headers)
 			if bErr != nil {
 				processError(conn, bErr)
-				break;
+				break
 			}
 
 			rErr := doRequest(conn, startLine.resource, config)
 			if rErr != nil {
 				processError(conn, rErr)
-				break;
+				break
 			}
 
 			fmt.Println("...request processed successfully")
@@ -74,10 +74,11 @@ func handleConnection(conn net.Conn, config configMap) {
 }
 
 type startLine struct {
-	method HTTPMethod
+	method   HTTPMethod
 	resource string
-	version string
+	version  string
 }
+
 func (sl *startLine) String(prefix string) string {
 	resource := sl.resource
 	if prefix != "" {
@@ -86,7 +87,7 @@ func (sl *startLine) String(prefix string) string {
 	if resource == "" {
 		resource = "/"
 	}
-	return sl.method.String()+" "+resource+" "+sl.version
+	return sl.method.String() + " " + resource + " " + sl.version
 }
 
 func parseStartLine(conn net.Conn) (startLine, httpError) {
@@ -107,14 +108,16 @@ func parseStartLine(conn net.Conn) (startLine, httpError) {
 		nextChar := charBuf[0]
 		if nextChar == 32 || nextChar == 13 {
 			switch part {
-				case 0:
-					httpMethod, metErr := AsMethod(buffer.String())
-					if metErr != nil {
-						return retVal, metErr
-					}
-					retVal.method = httpMethod
-				case 1: retVal.resource = buffer.String()
-				case 2: retVal.version = buffer.String()
+			case 0:
+				httpMethod, metErr := AsMethod(buffer.String())
+				if metErr != nil {
+					return retVal, metErr
+				}
+				retVal.method = httpMethod
+			case 1:
+				retVal.resource = buffer.String()
+			case 2:
+				retVal.version = buffer.String()
 			}
 
 			buffer.Reset()
@@ -130,7 +133,7 @@ func parseStartLine(conn net.Conn) (startLine, httpError) {
 	return retVal, nil
 }
 
-func parseHeaders (conn net.Conn) (map[string]string, httpError) {
+func parseHeaders(conn net.Conn) (map[string]string, httpError) {
 	fmt.Println("#parseHeaders")
 	headerMap := make(map[string]string)
 
@@ -159,19 +162,19 @@ func parseHeaders (conn net.Conn) (map[string]string, httpError) {
 				if headerSeparatorIdx > 0 { // this will happen on 2nd CRLF
 					headerName := strings.ToLower(headerRow[0:headerSeparatorIdx]) // normalizing on lower-case in case header names are sent w/o case regard
 					headerValue := headerRow[headerSeparatorIdx+1:]
-	
+
 					headerMap[headerName] = headerValue
 				}
-		
+
 				buffer.Reset()
 			}
 		} else {
 			endOfHeaders = false // if we got a non-CRLF, we're still processing header content
 			buffer.Write(headerByte[0:1])
-		}	
+		}
 	}
 
-	for hKey,hVal := range headerMap {
+	for hKey, hVal := range headerMap {
 		fmt.Printf("header '%v'=%v\n", hKey, hVal)
 	}
 	return headerMap, nil
@@ -191,12 +194,12 @@ func parseBody(conn net.Conn, headers map[string]string) (string, httpError) {
 				fmt.Printf("something happened reading the body content %v\n", bodyErr.Error())
 				return "", newInternalServerErrorError(bodyErr.Error())
 			}
-			
+
 			bodyContent := string(bodyBytes)
 			fmt.Printf("body: %v\n", bodyContent)
 			return bodyContent, nil
 		}
-		
+
 		fmt.Printf("invalid 'Content-Length' header value: %v\n", clHeader)
 		return "", newLengthRequiredError(clHeader)
 	} else {
@@ -205,21 +208,22 @@ func parseBody(conn net.Conn, headers map[string]string) (string, httpError) {
 }
 
 const (
-	READ_REQ_LEN = 1024
+	READ_REQ_LEN   = 1024
 	READ_PROXY_LEN = 2048
 )
+
 func doProxy(conn net.Conn, startLine startLine, config configMap) (wasProcessed bool, err httpError) {
 	fmt.Println("#doProxy")
 	resourceParts := strings.Split(startLine.resource, "/")
-	proxyRoot := "/"+resourceParts[1]
+	proxyRoot := "/" + resourceParts[1]
 	proxyPort, okpc := config.proxyContexts[proxyRoot]
 	if okpc {
 		fmt.Printf("...%v proxying to port %v\n", proxyRoot, proxyPort)
-		proxyConn, pErr := net.Dial("tcp", fmt.Sprint("localhost:",proxyPort))
+		proxyConn, pErr := net.Dial("tcp", fmt.Sprint("localhost:", proxyPort))
 		if pErr != nil {
 			return false, newInternalServerErrorError(pErr.Error())
 		}
-		
+
 		fmt.Printf("...connected to proxy: %v\n", startLine.String(proxyRoot))
 		proxyConn.Write([]byte(startLine.String(proxyRoot)))
 		proxyConn.Write([]byte("\r\n"))
@@ -236,7 +240,7 @@ func doProxy(conn net.Conn, startLine startLine, config configMap) (wasProcessed
 					break
 				}
 			}
-			
+
 			fmt.Printf("...writing %v bytes to proxy\n", string(reqBytes[0:readNum]))
 			_, writeErr := proxyConn.Write(reqBytes[0:readNum])
 			if writeErr != nil {
@@ -244,7 +248,7 @@ func doProxy(conn net.Conn, startLine startLine, config configMap) (wasProcessed
 			}
 
 			if readNum < READ_REQ_LEN {
-				break;
+				break
 			}
 		}
 
@@ -259,7 +263,7 @@ func doProxy(conn net.Conn, startLine startLine, config configMap) (wasProcessed
 					break
 				}
 			}
-			
+
 			fmt.Printf("...writing %v proxied bytes back to requestor\n", string(respBytes[0:readNum]))
 			_, writeErr := conn.Write(respBytes[0:readNum])
 			if writeErr != nil {
@@ -267,7 +271,7 @@ func doProxy(conn net.Conn, startLine startLine, config configMap) (wasProcessed
 			}
 
 			if readNum < READ_PROXY_LEN {
-				break;
+				break
 			}
 		}
 
@@ -284,10 +288,10 @@ func doRequest(conn net.Conn, resource string, config configMap) httpError {
 	if len(resource) == 0 { // is this even possible?  i suppose it could be
 		resource = "/"
 	}
-	
+
 	// determine if it's pointing to a virtual host or our root
 	resourceParts := strings.Split(resource, "/")
-	virtualHost := "/"+resourceParts[1]
+	virtualHost := "/" + resourceParts[1]
 	fmt.Printf("checking map %v for key %v\n", config.virtualHosts, virtualHost)
 	virtualRoot, okvh := config.virtualHosts[virtualHost]
 	if okvh {
@@ -297,7 +301,7 @@ func doRequest(conn net.Conn, resource string, config configMap) httpError {
 		resource = fmt.Sprint(config.root, resource)
 	}
 	if string(resource[len(resource)-1]) == "/" { // TODO: maybe configure the 'index' file name?
-		resource = resource+"index.html"
+		resource = resource + "index.html"
 	}
 	fmt.Printf("...actual resource %v\n", resource)
 
@@ -306,7 +310,7 @@ func doRequest(conn net.Conn, resource string, config configMap) httpError {
 		fmt.Printf("error stating file %v, %v\n", resource, statErr.Error())
 		return newNotFoundError(statErr.Error())
 	}
-	
+
 	fileSize := fileInfo.Size()
 	fmt.Printf("...size %v\n", fileSize)
 
@@ -316,13 +320,13 @@ func doRequest(conn net.Conn, resource string, config configMap) httpError {
 		fmt.Printf("error opening file %v, %v\n", resource, openErr.Error())
 		return newForbiddenError(statErr.Error())
 	}
-	
+
 	_, readErr := file.Read(fileBytes)
 	if readErr != nil {
 		fmt.Printf("error reading from file %v, %v\n", resource, readErr.Error())
 		return newForbiddenError(statErr.Error())
 	}
-	
+
 	processResponse(conn, new200Response(), mimeForFile(resource), fileBytes)
 	return nil
 }

@@ -1,24 +1,24 @@
 package main
 
 import (
-	"path/filepath"
 	"flag"
 	"fmt"
-	"os"
-	"strconv"
 	"github.com/magiconair/properties"
+	"os"
+	"path/filepath"
+	"strconv"
 )
 
 type configMap struct {
-	port int
-	root string
-	virtualHosts map[string]string
+	port          int
+	root          string
+	virtualHosts  map[string]string
 	proxyContexts map[string]int
 }
 
 const (
-	DEFAULT_PORT = 8080
-	DEFAULT_ROOT = "root"
+	DEFAULT_PORT   = 8080
+	DEFAULT_ROOT   = "root"
 	DEFAULT_CONFIG = "./config.properties"
 )
 
@@ -52,9 +52,9 @@ func getConfig() configMap {
 	root, _ = filepath.Abs(root)
 
 	config := configMap{
-		port: port,
-		root: root,
-		virtualHosts: make(map[string]string),
+		port:          port,
+		root:          root,
+		virtualHosts:  make(map[string]string),
 		proxyContexts: make(map[string]int),
 	}
 
@@ -67,7 +67,7 @@ func getConfig() configMap {
 					fmt.Printf("invalid port value for proxy-context in %v :'%v'\n", configPath, value)
 					os.Exit(1)
 				}
-				
+
 				config.proxyContexts[key] = portNum
 			} else {
 				config.virtualHosts[key] = value
@@ -75,5 +75,6 @@ func getConfig() configMap {
 		}
 	}
 
+	fmt.Printf("final configuration: %v\n", config)
 	return config
 }
