@@ -5,11 +5,11 @@ import (
 	"os"
 	"strings"
 	"bytes"
-	"flag"
+	"io"
 	"mime"
 	"net"
+	"strconv"
 	"path/filepath"
-	"github.com/magiconair/properties"
 )
 
 func main() {
@@ -37,229 +37,291 @@ func main() {
 func handleConnection(conn net.Conn, config configMap) {
 	defer conn.Close()
 
+	fmt.Printf("#handleConnection for %v", conn.RemoteAddr())
+
 	for {
-		errBreak := false
-		part := 0
-		eof := 0
-		firstLine := true
-		methodBuf := bytes.NewBuffer(nil)
-		resourceBuf := bytes.NewBuffer(nil)
-		versionBuf := bytes.NewBuffer(nil)
-		headerBuf := bytes.NewBuffer(nil)
-		headers := make(map[string]string)
-		charBuf := make([]byte, 1)
-		for { // we're just processing the first line; otherwise end after 2 consecutive CRLF or end of #Read
-			n, err := conn.Read(charBuf)
-			if err != nil {
-				fmt.Printf("something happened reading from the connection %v\n", err.Error())
-				errBreak = true
-				break
-			} else if n == 1 { // check char if 1 is read
-				if firstLine { // if we're still on the first line, parse out method/resource/version
-					if charBuf[0] == 13 { // CR which means we're at the end of the first line so ignore
-						continue
-					} else if charBuf[0] == 10 { // LF so bump the eof  and skip this first-line section
-						firstLine = false;
-						eof++
-					} else if charBuf[0] == 32 { // skip the char if a space or a CR (which bumps us off the first line)
-						part++
-					} else {
-						switch part {
-							case 0:
-								methodBuf.Write(charBuf[0:1])
-							case 1:
-								resourceBuf.Write(charBuf[0:1])
-							default:
-								versionBuf.Write(charBuf[0:1])
-						}
+		startLine, slErr := parseStartLine(conn)
+		if slErr != nil {
+			processError(conn, slErr)
+			break;
+		}
+		proxyProcessed, pErr := doProxy(conn, startLine, config)
+		if pErr != nil {
+			processError(conn, pErr)
+			break;
+		}
+		if (!proxyProcessed) {
+			headers, hErr := parseHeaders(conn)
+			if hErr != nil {
+				processError(conn, hErr)
+				break;
+			}
+			_, bErr := parseBody(conn, headers)
+			if bErr != nil {
+				processError(conn, bErr)
+				break;
+			}
+
+			rErr := doRequest(conn, startLine.resource, config)
+			if rErr != nil {
+				processError(conn, rErr)
+				break;
+			}
+
+			fmt.Println("...request processed successfully")
+		}
+	}
+}
+
+type startLine struct {
+	method HTTPMethod
+	resource string
+	version string
+}
+func (sl *startLine) String() string {
+	return sl.method.String()+" "+sl.resource+" "+sl.version
+}
+
+func parseStartLine(conn net.Conn) (startLine, httpError) {
+	fmt.Println("#parseStartLine")
+	retVal := startLine{}
+
+	charBuf := make([]byte, 1)
+	buffer := bytes.NewBuffer(nil)
+	part := 0
+
+	for {
+		_, readErr := conn.Read(charBuf)
+		if readErr != nil {
+			fmt.Printf("something happened reading from the start line: %v\n", readErr.Error())
+			return retVal, newInternalServerErrorError(readErr.Error())
+		}
+
+		nextChar := charBuf[0]
+		if nextChar == 32 || nextChar == 13 {
+			switch part {
+				case 0:
+					httpMethod, metErr := AsMethod(buffer.String())
+					if metErr != nil {
+						return retVal, metErr
 					}
-				} else { // put all this stuff into the header buffer and exhause the request content
-					if charBuf[0] == 10 { // inc 'eof' after CRLF
-						eof++
-						if eof == 2 { // stop after 2 consecutive CRLF
-							break
-						}
-					} else if charBuf[0] == 13 { // at the end of the line, parse out content and add to our header map
-						headerSeparatorIdx := strings.Index(headerBuf.String(), ":")
-						if headerSeparatorIdx > 0 { // this will happen on 2nd CRLF
-							headerName := strings.ToLower(headerBuf.String()[0:headerSeparatorIdx])
-							headerValue := strings.TrimSpace(headerBuf.String()[headerSeparatorIdx+1:])
-							headers[headerName] = headerValue
-						}
-
-						headerBuf.Reset()
-					} else { // reset our eof counter if we read a non-CRLF char and add to our header buffer
-						eof = 0
-						headerBuf.Write(charBuf[0:1])
-					}	
-				}
-			} else {
-				fmt.Println("read 0 bytes from net.Conn")
-				break
+					retVal.method = httpMethod
+				case 1: retVal.resource = buffer.String()
+				case 2: retVal.version = buffer.String()
 			}
-		}
-		if errBreak {
+
+			buffer.Reset()
+			part++
+		} else if nextChar == 10 {
 			break
-		}
-		fmt.Printf("method '%v' resource '%v' version '%v'\n", methodBuf.String(), resourceBuf.String(), versionBuf.String())
-		for hKey,hVal := range headers {
-			fmt.Printf("...with header '%v'=%v\n", hKey, hVal)
-		}
-		contentLength, clOk := headers["content-length"]
-		if clOk {
-			fmt.Printf("content-length=%v\n", contentLength)
-		}
-	
-		var statusLine string
-	
-		validMethod := checkMethod(methodBuf.String())
-		if !validMethod {
-			statusLine = getStatusLine(405)
-		}
-	
-		resourceStr := resourceBuf.String()
-		if len(resourceStr) == 0 {
-			resourceStr = "/"
-		}
-	
-		// determine if it's poiting to a virtual host or our root
-		var requestedResource string
-		resourceParts := strings.Split(resourceStr, "/")
-		virtualHost := "/"+resourceParts[1]
-		fmt.Printf("checking map %v for key %v\n", config.virtualHosts, virtualHost)
-		virtualRoot, okvh := config.virtualHosts[virtualHost]
-		if okvh {
-			virtualPath := resourceStr[len(virtualHost):]
-			requestedResource = fmt.Sprint(virtualRoot, virtualPath)
 		} else {
-			requestedResource = fmt.Sprint(config.root, resourceStr)
+			buffer.Write(charBuf[:])
 		}
-		if string(requestedResource[len(requestedResource)-1]) == "/" {
-			requestedResource = requestedResource+"index.html"
+	}
+
+	fmt.Printf("parsed out start-line: %v\n", retVal)
+	return retVal, nil
+}
+
+func parseHeaders (conn net.Conn) (map[string]string, httpError) {
+	fmt.Println("#parseHeaders")
+	headerMap := make(map[string]string)
+
+	endOfHeaders := false
+	headerByte := make([]byte, 1)
+	buffer := bytes.NewBuffer(nil)
+
+	for {
+		_, readErr := conn.Read(headerByte)
+		if readErr != nil {
+			fmt.Printf("something happened reading from the header section: %v\n", readErr.Error())
+			return headerMap, newInternalServerErrorError(readErr.Error())
 		}
-		var fileSize int64
-		var fileBytes []byte
-		okResp := false
-		fmt.Printf("reading resource %v...\n", requestedResource)
-	
-		fileInfo, statErr := os.Stat(requestedResource)
-		if statErr != nil {
-			fmt.Printf("error stating file %v, %v\n", requestedResource, statErr.Error())
-			statusLine = getStatusLine(404)
-		} else {
-			fileSize = fileInfo.Size()
-			fmt.Printf("...size %v...\n", fileSize)
-		
-			fileBytes = make([]byte, fileSize)
-			file, openErr := os.Open(requestedResource)
-			if openErr != nil {
-				fmt.Printf("error opening file %v, %v\n", requestedResource, openErr.Error())
-				statusLine = getStatusLine(403)
+
+		nextChar := headerByte[0]
+		if nextChar == 10 { // end of headers after 2nd CRLF
+			if endOfHeaders {
+				break
 			} else {
-				numRead, readErr := file.Read(fileBytes)
-				if readErr != nil {
-					fmt.Printf("error reading from file %v, %v\n", requestedResource, readErr.Error())
-					statusLine = getStatusLine(403)
-				} else {
-					okResp = true
-					statusLine = getStatusLine(200)
+				endOfHeaders = true
+			}
+		} else if nextChar == 13 { // at the end of the line (CR), parse out content and add to our header map
+			if !endOfHeaders { // this will be true on 2nd consecutive CRLF
+				headerRow := buffer.String()
+				headerSeparatorIdx := strings.Index(headerRow, ":")
+				if headerSeparatorIdx > 0 { // this will happen on 2nd CRLF
+					headerName := strings.ToLower(headerRow[0:headerSeparatorIdx]) // normalizing on lower-case in case header names are sent w/o case regard
+					headerValue := headerRow[headerSeparatorIdx+1:]
 	
-					fmt.Printf("read %v bytes from file %v...\n", numRead, requestedResource)
-					// fmt.Println(string(fileBytes))
+					headerMap[headerName] = headerValue
+				}
+		
+				buffer.Reset()
+			}
+		} else {
+			endOfHeaders = false // if we got a non-CRLF, we're still processing header content
+			buffer.Write(headerByte[0:1])
+		}	
+	}
+
+	for hKey,hVal := range headerMap {
+		fmt.Printf("header '%v'=%v\n", hKey, hVal)
+	}
+	return headerMap, nil
+}
+
+func parseBody(conn net.Conn, headers map[string]string) (string, httpError) {
+	fmt.Println("#parseBody")
+	clHeader, clHeaderOK := headers["content-length"]
+	if clHeaderOK {
+		contentLength, clOk := strconv.Atoi(clHeader)
+		if clOk == nil {
+			fmt.Printf("'Content-Length'=%v\n", contentLength)
+			bodyBytes := make([]byte, contentLength)
+
+			_, bodyErr := conn.Read(bodyBytes) // TODO: maybe check if bodyLen doesn't match cl
+			if bodyErr != nil {
+				fmt.Printf("something happened reading the body content %v\n", bodyErr.Error())
+				return "", newInternalServerErrorError(bodyErr.Error())
+			}
+			
+			bodyContent := string(bodyBytes)
+			fmt.Printf("body: %v\n", bodyContent)
+			return bodyContent, nil
+		}
+		
+		fmt.Printf("invalid 'Content-Length' header value: %v\n", clHeader)
+		return "", newLengthRequiredError(clHeader)
+	} else {
+		return "", nil
+	}
+}
+
+func doProxy(conn net.Conn, startLine startLine, config configMap) (wasProcessed bool, err httpError) {
+	resourceParts := strings.Split(startLine.resource, "/")
+	proxyRoot := "/"+resourceParts[1]
+	proxyPort, okpc := config.proxyContexts[proxyRoot]
+	if okpc {
+		fmt.Printf("%v proxying to port %v\n", proxyRoot, proxyPort)
+		proxyConn, pErr := net.Dial("tcp", fmt.Sprint("localhost:",proxyPort))
+		if pErr != nil {
+			return false, newInternalServerErrorError(pErr.Error())
+		}
+		
+		proxyConn.Write([]byte(startLine.String()))
+		proxyConn.Write([]byte("\r\n"))
+
+		reqBytes := make([]byte, 1024) // TODO: is 1K a good size for forwarding the request?  maybe larger on the response?
+		for {
+			_, readErr := conn.Read(reqBytes)
+			if readErr != nil {
+				if err != io.EOF {
+					return false, newInternalServerErrorError(readErr.Error())
+				} else {
+					break
 				}
 			}
+			
+			_, writeErr := proxyConn.Write(reqBytes)
+			if writeErr != nil {
+				return false, newInternalServerErrorError(writeErr.Error())
+			}
 		}
+
+		respBytes := make([]byte, 2048) // expect response to be larger, so 2k stream size?
+		for {
+			_, readErr := proxyConn.Read(respBytes)
+			if readErr != nil {
+				if err != io.EOF {
+					return false, newInternalServerErrorError(readErr.Error())
+				} else {
+					break
+				}
+			}
+			
+			_, writeErr := conn.Write(respBytes)
+			if writeErr != nil {
+				return false, newInternalServerErrorError(writeErr.Error())
+			}
+		}
+
+		return true, nil
+	} else {
+		return false, nil
+	}
+}
+
+func doRequest(conn net.Conn, resource string, config configMap) httpError {
+	fmt.Printf("#doRequest for: %v\n", resource)
+
+	if len(resource) == 0 { // is this even possible?  i suppose it could be
+		resource = "/"
+	}
 	
-		conn.Write([]byte(statusLine))
-		if okResp {
-			conn.Write([]byte(fmt.Sprint("Content-Type: ", mimeForFile(requestedResource), "\r\n")))
-			conn.Write([]byte(fmt.Sprint("Content-Length: ", fileSize, "\r\n")))
-		}
-		conn.Write([]byte("\r\n"))
-		conn.Write(fileBytes)
+	// determine if it's pointing to a virtual host or our root
+	resourceParts := strings.Split(resource, "/")
+	virtualHost := "/"+resourceParts[1]
+	fmt.Printf("checking map %v for key %v\n", config.virtualHosts, virtualHost)
+	virtualRoot, okvh := config.virtualHosts[virtualHost]
+	if okvh {
+		virtualPath := resource[len(virtualHost):]
+		resource = fmt.Sprint(virtualRoot, virtualPath)
+	} else {
+		resource = fmt.Sprint(config.root, resource)
 	}
+	if string(resource[len(resource)-1]) == "/" { // TODO: maybe configure the 'index' file name?
+		resource = resource+"index.html"
+	}
+	fmt.Printf("...actual resource %v\n", resource)
+
+	fileInfo, statErr := os.Stat(resource)
+	if statErr != nil {
+		fmt.Printf("error stating file %v, %v\n", resource, statErr.Error())
+		return newNotFoundError(statErr.Error())
+	}
+	
+	fileSize := fileInfo.Size()
+	fmt.Printf("...size %v\n", fileSize)
+
+	fileBytes := make([]byte, fileSize)
+	file, openErr := os.Open(resource)
+	if openErr != nil {
+		fmt.Printf("error opening file %v, %v\n", resource, openErr.Error())
+		return newForbiddenError(statErr.Error())
+	}
+	
+	_, readErr := file.Read(fileBytes)
+	if readErr != nil {
+		fmt.Printf("error reading from file %v, %v\n", resource, readErr.Error())
+		return newForbiddenError(statErr.Error())
+	}
+	
+	processResponse(conn, new200Response(), mimeForFile(resource), fileBytes)
+	return nil
 }
 
-func checkMethod(method string) (valid bool) {
-	switch (strings.ToUpper(method)) {
-		case "GET":
-			return true
-		default:
-			return false
-	}
+func processResponse(conn net.Conn, respStatus httpResponse, mimeType string, respBytes []byte) {
+	fmt.Printf("responding with status/mime %v/%v\n", respStatus, mimeType)
+
+	conn.Write([]byte(getStatusLine(respStatus)))
+	conn.Write([]byte(fmt.Sprint("Content-Type: ", mimeType, "\r\n")))
+	conn.Write([]byte(fmt.Sprint("Content-Length: ", len(respBytes), "\r\n")))
+	conn.Write([]byte("\r\n"))
+	conn.Write(respBytes)
+
 }
 
-func getStatusLine(cd int) (statusLine string) {
-	prefix := fmt.Sprint("HTTP/1.1 ", cd)
-	switch cd {
-		case 200:
-			return fmt.Sprint(prefix, " OK\r\n")
-		case 403:
-			return fmt.Sprint(prefix, " Forbidden\r\n")
-		case 404:
-			return fmt.Sprint(prefix, " Not Found\r\n")
-		case 405:
-			return fmt.Sprint(prefix, " Method not Allowed\r\n")
-		default: return fmt.Sprint(prefix, "\r\n")
-	}
-}
+func processError(conn net.Conn, err httpError) {
+	fmt.Printf("responding with error %v\n", err)
 
-type configMap struct {
-	port int
-	root string
-	virtualHosts map[string]string
-}
-
-const (
-	DEFAULT_PORT = 8080
-	DEFAULT_ROOT = "."
-	DEFAULT_CONFIG = "./config.properties"
-)
-
-// command-line > properties > defaults
-func getConfig() configMap {
-	var port int
-	flag.IntVar(&port, "port", 0, "'port' must be an int")
-
-	var root string
-	flag.StringVar(&root, "root", "", "'root' must be a valid path")
-
-	var configPath string
-	flag.StringVar(&configPath, "config", "", "'config' must be a valid path")
-
-	flag.Parse()
-
-	if configPath == "" {
-		configPath = DEFAULT_CONFIG
-	}
-	configPath, _ = filepath.Abs(configPath)
-
-	configProperties := properties.MustLoadFile(configPath, properties.UTF8)
-
-	if port == 0 {
-		port = configProperties.GetInt("port", DEFAULT_PORT)
-	}
-
-	if root == "" {
-		root = configProperties.GetString("root", DEFAULT_ROOT)
-	}
-	root, _ = filepath.Abs(root)
-
-	config := configMap{
-		port: port,
-		root: root,
-		virtualHosts: make(map[string]string),
-	}
-
-	for _, key := range configProperties.Keys() {
-		if string(key[0]) == "/" {
-			config.virtualHosts[key] = configProperties.GetString(key, "")
-		}
-	}
-
-	return config
+	conn.Write([]byte(getStatusLine(err)))
+	conn.Write([]byte("\r\n\r\n"))
 }
 
 func mimeForFile(fileName string) (mimeType string) {
 	return mime.TypeByExtension(filepath.Ext(fileName))
+}
+
+func getStatusLine(resp httpResponse) string {
+	return fmt.Sprint("HTTP/1.1 ", resp.Code(), " ", resp.Message(), "\r\n")
 }
