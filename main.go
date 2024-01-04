@@ -37,7 +37,7 @@ func main() {
 func handleConnection(conn net.Conn, config configMap) {
 	defer conn.Close()
 
-	fmt.Printf("#handleConnection for %v", conn.RemoteAddr())
+	fmt.Printf("#handleConnection for %v\n", conn.RemoteAddr())
 
 	for {
 		startLine, slErr := parseStartLine(conn)
@@ -78,8 +78,15 @@ type startLine struct {
 	resource string
 	version string
 }
-func (sl *startLine) String() string {
-	return sl.method.String()+" "+sl.resource+" "+sl.version
+func (sl *startLine) String(prefix string) string {
+	resource := sl.resource
+	if prefix != "" {
+		resource = resource[len(prefix):]
+	}
+	if resource == "" {
+		resource = "/"
+	}
+	return sl.method.String()+" "+resource+" "+sl.version
 }
 
 func parseStartLine(conn net.Conn) (startLine, httpError) {
@@ -197,40 +204,54 @@ func parseBody(conn net.Conn, headers map[string]string) (string, httpError) {
 	}
 }
 
+const (
+	READ_REQ_LEN = 1024
+	READ_PROXY_LEN = 2048
+)
 func doProxy(conn net.Conn, startLine startLine, config configMap) (wasProcessed bool, err httpError) {
+	fmt.Println("#doProxy")
 	resourceParts := strings.Split(startLine.resource, "/")
 	proxyRoot := "/"+resourceParts[1]
 	proxyPort, okpc := config.proxyContexts[proxyRoot]
 	if okpc {
-		fmt.Printf("%v proxying to port %v\n", proxyRoot, proxyPort)
+		fmt.Printf("...%v proxying to port %v\n", proxyRoot, proxyPort)
 		proxyConn, pErr := net.Dial("tcp", fmt.Sprint("localhost:",proxyPort))
 		if pErr != nil {
 			return false, newInternalServerErrorError(pErr.Error())
 		}
 		
-		proxyConn.Write([]byte(startLine.String()))
+		fmt.Printf("...connected to proxy: %v\n", startLine.String(proxyRoot))
+		proxyConn.Write([]byte(startLine.String(proxyRoot)))
 		proxyConn.Write([]byte("\r\n"))
 
-		reqBytes := make([]byte, 1024) // TODO: is 1K a good size for forwarding the request?  maybe larger on the response?
+		reqBytes := make([]byte, READ_REQ_LEN) // TODO: is 1K a good size for forwarding the request?  maybe larger on the response?
 		for {
-			_, readErr := conn.Read(reqBytes)
+			fmt.Println("...awaiting requestor bytes")
+			readNum, readErr := conn.Read(reqBytes)
 			if readErr != nil {
 				if err != io.EOF {
 					return false, newInternalServerErrorError(readErr.Error())
 				} else {
+					fmt.Println("...reached end of proxied request")
 					break
 				}
 			}
 			
-			_, writeErr := proxyConn.Write(reqBytes)
+			fmt.Printf("...writing %v bytes to proxy\n", string(reqBytes[0:readNum]))
+			_, writeErr := proxyConn.Write(reqBytes[0:readNum])
 			if writeErr != nil {
 				return false, newInternalServerErrorError(writeErr.Error())
+			}
+
+			if readNum < READ_REQ_LEN {
+				break;
 			}
 		}
 
-		respBytes := make([]byte, 2048) // expect response to be larger, so 2k stream size?
+		respBytes := make([]byte, READ_PROXY_LEN) // expect response to be larger, so 2k stream size?
 		for {
-			_, readErr := proxyConn.Read(respBytes)
+			fmt.Println("...awaiting proxy response")
+			readNum, readErr := proxyConn.Read(respBytes)
 			if readErr != nil {
 				if err != io.EOF {
 					return false, newInternalServerErrorError(readErr.Error())
@@ -239,14 +260,20 @@ func doProxy(conn net.Conn, startLine startLine, config configMap) (wasProcessed
 				}
 			}
 			
-			_, writeErr := conn.Write(respBytes)
+			fmt.Printf("...writing %v proxied bytes back to requestor\n", string(respBytes[0:readNum]))
+			_, writeErr := conn.Write(respBytes[0:readNum])
 			if writeErr != nil {
 				return false, newInternalServerErrorError(writeErr.Error())
+			}
+
+			if readNum < READ_PROXY_LEN {
+				break;
 			}
 		}
 
 		return true, nil
 	} else {
+		fmt.Println("...no proxy configured")
 		return false, nil
 	}
 }
