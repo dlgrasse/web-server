@@ -2,11 +2,12 @@ package main
 
 import (
 	"flag"
-	"fmt"
-	"github.com/magiconair/properties"
 	"os"
 	"path/filepath"
 	"strconv"
+	"github.com/rs/zerolog"
+    "github.com/rs/zerolog/log"
+	"github.com/magiconair/properties"
 )
 
 type configMap struct {
@@ -14,12 +15,14 @@ type configMap struct {
 	root          string
 	virtualHosts  map[string]string
 	proxyContexts map[string]int
+	logLevel 	  zerolog.Level
 }
 
 const (
 	DEFAULT_PORT   = 8080
 	DEFAULT_ROOT   = "root"
 	DEFAULT_CONFIG = "./config.properties"
+	DEFAULT_LOG_LEVEL = zerolog.InfoLevel
 )
 
 // command-line > properties > defaults
@@ -32,6 +35,9 @@ func getConfig() configMap {
 
 	var configPath string
 	flag.StringVar(&configPath, "config", "", "'config' must be a valid path")
+
+	var logLevel string
+	flag.StringVar(&logLevel, "logLevel", "", "'logLevel' must be a valid string")
 
 	flag.Parse()
 
@@ -50,12 +56,21 @@ func getConfig() configMap {
 		root = configProperties.GetString("root", DEFAULT_ROOT)
 	}
 	root, _ = filepath.Abs(root)
+	
+	if logLevel == "" {
+		logLevel = configProperties.GetString("logLevel", DEFAULT_LOG_LEVEL.String())
+	}
+	zerologLevel, zErr := zerolog.ParseLevel(logLevel)
+	if zErr != nil {
+		log.Fatal().Err(zErr).Msgf("Invalid log level %v", logLevel)
+	}
 
 	config := configMap{
 		port:          port,
 		root:          root,
 		virtualHosts:  make(map[string]string),
 		proxyContexts: make(map[string]int),
+		logLevel:      zerologLevel,
 	}
 
 	for _, key := range configProperties.Keys() {
@@ -64,8 +79,7 @@ func getConfig() configMap {
 			if string(value[0]) == ":" {
 				portNum, portErr := strconv.Atoi(value[1:])
 				if portErr != nil {
-					fmt.Printf("invalid port value for proxy-context in %v :'%v'\n", configPath, value)
-					os.Exit(1)
+					log.Fatal().Msgf("invalid port value for proxy-context in %v: %v'", configPath, value)
 				}
 
 				config.proxyContexts[key] = portNum
@@ -75,6 +89,11 @@ func getConfig() configMap {
 		}
 	}
 
-	fmt.Printf("final configuration: %v\n", config)
+	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
+	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	zerolog.SetGlobalLevel(config.logLevel)
+
+	log.Info().Msgf("final configuration: %v", config)
+
 	return config
 }

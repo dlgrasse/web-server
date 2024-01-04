@@ -10,25 +10,22 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+    "github.com/rs/zerolog/log"
 )
 
 func main() {
 	config := getConfig()
 
-	fmt.Printf("config=%v\n", config)
-
 	listener, err := net.Listen("tcp", fmt.Sprint(":", config.port))
 	if err != nil {
-		fmt.Printf("Cannot listen to port %v\n", config.port)
-		os.Exit(1)
+		log.Fatal().Err(err).Msgf("Cannot listen to port %v", config.port)
 	}
 	defer listener.Close()
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			fmt.Printf("error accepting connection on socket %v\n", err.Error())
-			os.Exit(1)
+			log.Fatal().Err(err).Msg("error accepting connection on socket")
 		}
 		go handleConnection(conn, config)
 	}
@@ -37,7 +34,7 @@ func main() {
 func handleConnection(conn net.Conn, config configMap) {
 	defer conn.Close()
 
-	fmt.Printf("#handleConnection for %v\n", conn.RemoteAddr())
+	log.Info().Msgf("#handleConnection for %v", conn.RemoteAddr())
 
 	for {
 		startLine, slErr := parseStartLine(conn)
@@ -68,7 +65,7 @@ func handleConnection(conn net.Conn, config configMap) {
 				break
 			}
 
-			fmt.Println("...request processed successfully")
+			log.Debug().Msg("...request processed successfully")
 		}
 	}
 }
@@ -91,7 +88,7 @@ func (sl *startLine) String(prefix string) string {
 }
 
 func parseStartLine(conn net.Conn) (startLine, httpError) {
-	fmt.Println("#parseStartLine")
+	log.Trace().Msg("#parseStartLine")
 	retVal := startLine{}
 
 	charBuf := make([]byte, 1)
@@ -101,7 +98,7 @@ func parseStartLine(conn net.Conn) (startLine, httpError) {
 	for {
 		_, readErr := conn.Read(charBuf)
 		if readErr != nil {
-			fmt.Printf("something happened reading from the start line: %v\n", readErr.Error())
+			log.Error().Err(readErr).Msg("something happened reading from the start line")
 			return retVal, newInternalServerErrorError(readErr.Error())
 		}
 
@@ -129,12 +126,12 @@ func parseStartLine(conn net.Conn) (startLine, httpError) {
 		}
 	}
 
-	fmt.Printf("parsed out start-line: %v\n", retVal)
+	log.Printf("parsed out start-line: %v", retVal)
 	return retVal, nil
 }
 
 func parseHeaders(conn net.Conn) (map[string]string, httpError) {
-	fmt.Println("#parseHeaders")
+	log.Trace().Msg("#parseHeaders")
 	headerMap := make(map[string]string)
 
 	endOfHeaders := false
@@ -144,7 +141,7 @@ func parseHeaders(conn net.Conn) (map[string]string, httpError) {
 	for {
 		_, readErr := conn.Read(headerByte)
 		if readErr != nil {
-			fmt.Printf("something happened reading from the header section: %v\n", readErr.Error())
+			log.Error().Err(readErr).Msg("something happened reading from the header section")
 			return headerMap, newInternalServerErrorError(readErr.Error())
 		}
 
@@ -175,32 +172,32 @@ func parseHeaders(conn net.Conn) (map[string]string, httpError) {
 	}
 
 	for hKey, hVal := range headerMap {
-		fmt.Printf("header '%v'=%v\n", hKey, hVal)
+		log.Trace().Msgf("header '%v'=%v", hKey, hVal)
 	}
 	return headerMap, nil
 }
 
 func parseBody(conn net.Conn, headers map[string]string) (string, httpError) {
-	fmt.Println("#parseBody")
+	log.Trace().Msg("#parseBody")
 	clHeader, clHeaderOK := headers["content-length"]
 	if clHeaderOK {
 		contentLength, clOk := strconv.Atoi(clHeader)
 		if clOk == nil {
-			fmt.Printf("'Content-Length'=%v\n", contentLength)
+			log.Trace().Msgf("'Content-Length'=%v", contentLength)
 			bodyBytes := make([]byte, contentLength)
 
 			_, bodyErr := conn.Read(bodyBytes) // TODO: maybe check if bodyLen doesn't match cl
 			if bodyErr != nil {
-				fmt.Printf("something happened reading the body content %v\n", bodyErr.Error())
+				log.Error().Err(bodyErr).Msg("something happened reading the body content")
 				return "", newInternalServerErrorError(bodyErr.Error())
 			}
 
 			bodyContent := string(bodyBytes)
-			fmt.Printf("body: %v\n", bodyContent)
+			log.Printf("body: %v", bodyContent)
 			return bodyContent, nil
 		}
 
-		fmt.Printf("invalid 'Content-Length' header value: %v\n", clHeader)
+		log.Info().Msgf("invalid 'Content-Length' header value: %v", clHeader)
 		return "", newLengthRequiredError(clHeader)
 	} else {
 		return "", nil
@@ -213,35 +210,35 @@ const (
 )
 
 func doProxy(conn net.Conn, startLine startLine, config configMap) (wasProcessed bool, err httpError) {
-	fmt.Println("#doProxy")
+	log.Trace().Msg("#doProxy")
 	resourceParts := strings.Split(startLine.resource, "/")
 	proxyRoot := "/" + resourceParts[1]
 	proxyPort, okpc := config.proxyContexts[proxyRoot]
 	if okpc {
-		fmt.Printf("...%v proxying to port %v\n", proxyRoot, proxyPort)
+		log.Debug().Msgf("...%v proxying to port %v", proxyRoot, proxyPort)
 		proxyConn, pErr := net.Dial("tcp", fmt.Sprint("localhost:", proxyPort))
 		if pErr != nil {
 			return false, newInternalServerErrorError(pErr.Error())
 		}
 
-		fmt.Printf("...connected to proxy: %v\n", startLine.String(proxyRoot))
+		log.Printf("...connected to proxy: %v", startLine.String(proxyRoot))
 		proxyConn.Write([]byte(startLine.String(proxyRoot)))
 		proxyConn.Write([]byte("\r\n"))
 
 		reqBytes := make([]byte, READ_REQ_LEN) // TODO: is 1K a good size for forwarding the request?  maybe larger on the response?
 		for {
-			fmt.Println("...awaiting requestor bytes")
+			log.Trace().Msg("...awaiting requestor bytes")
 			readNum, readErr := conn.Read(reqBytes)
 			if readErr != nil {
 				if err != io.EOF {
 					return false, newInternalServerErrorError(readErr.Error())
 				} else {
-					fmt.Println("...reached end of proxied request")
+					log.Trace().Msg("...reached end of proxied request")
 					break
 				}
 			}
 
-			fmt.Printf("...writing %v bytes to proxy\n", string(reqBytes[0:readNum]))
+			log.Trace().Msgf("...writing %v bytes to proxy", string(reqBytes[0:readNum]))
 			_, writeErr := proxyConn.Write(reqBytes[0:readNum])
 			if writeErr != nil {
 				return false, newInternalServerErrorError(writeErr.Error())
@@ -254,7 +251,7 @@ func doProxy(conn net.Conn, startLine startLine, config configMap) (wasProcessed
 
 		respBytes := make([]byte, READ_PROXY_LEN) // expect response to be larger, so 2k stream size?
 		for {
-			fmt.Println("...awaiting proxy response")
+			log.Trace().Msg("...awaiting proxy response")
 			readNum, readErr := proxyConn.Read(respBytes)
 			if readErr != nil {
 				if err != io.EOF {
@@ -264,7 +261,7 @@ func doProxy(conn net.Conn, startLine startLine, config configMap) (wasProcessed
 				}
 			}
 
-			fmt.Printf("...writing %v proxied bytes back to requestor\n", string(respBytes[0:readNum]))
+			log.Trace().Msgf("...writing %v proxied bytes back to requestor", string(respBytes[0:readNum]))
 			_, writeErr := conn.Write(respBytes[0:readNum])
 			if writeErr != nil {
 				return false, newInternalServerErrorError(writeErr.Error())
@@ -277,13 +274,13 @@ func doProxy(conn net.Conn, startLine startLine, config configMap) (wasProcessed
 
 		return true, nil
 	} else {
-		fmt.Println("...no proxy configured")
+		log.Trace().Msg("...no proxy configured")
 		return false, nil
 	}
 }
 
 func doRequest(conn net.Conn, resource string, config configMap) httpError {
-	fmt.Printf("#doRequest for: %v\n", resource)
+	log.Debug().Msgf("#doRequest for: %v", resource)
 
 	if len(resource) == 0 { // is this even possible?  i suppose it could be
 		resource = "/"
@@ -292,7 +289,7 @@ func doRequest(conn net.Conn, resource string, config configMap) httpError {
 	// determine if it's pointing to a virtual host or our root
 	resourceParts := strings.Split(resource, "/")
 	virtualHost := "/" + resourceParts[1]
-	fmt.Printf("checking map %v for key %v\n", config.virtualHosts, virtualHost)
+	log.Trace().Msgf("checking map %v for key %v", config.virtualHosts, virtualHost)
 	virtualRoot, okvh := config.virtualHosts[virtualHost]
 	if okvh {
 		virtualPath := resource[len(virtualHost):]
@@ -303,27 +300,27 @@ func doRequest(conn net.Conn, resource string, config configMap) httpError {
 	if string(resource[len(resource)-1]) == "/" { // TODO: maybe configure the 'index' file name?
 		resource = resource + "index.html"
 	}
-	fmt.Printf("...actual resource %v\n", resource)
+	log.Trace().Msgf("...actual resource %v", resource)
 
 	fileInfo, statErr := os.Stat(resource)
 	if statErr != nil {
-		fmt.Printf("error stating file %v, %v\n", resource, statErr.Error())
+		log.Error().Err(statErr).Msgf("error stating file %v", resource)
 		return newNotFoundError(statErr.Error())
 	}
 
 	fileSize := fileInfo.Size()
-	fmt.Printf("...size %v\n", fileSize)
+	log.Printf("...size %v", fileSize)
 
 	fileBytes := make([]byte, fileSize)
 	file, openErr := os.Open(resource)
 	if openErr != nil {
-		fmt.Printf("error opening file %v, %v\n", resource, openErr.Error())
+		log.Error().Err(openErr).Msgf("error opening file %v", resource)
 		return newForbiddenError(statErr.Error())
 	}
 
 	_, readErr := file.Read(fileBytes)
 	if readErr != nil {
-		fmt.Printf("error reading from file %v, %v\n", resource, readErr.Error())
+		log.Error().Err(readErr).Msgf("error reading file %v", resource)
 		return newForbiddenError(statErr.Error())
 	}
 
@@ -332,7 +329,7 @@ func doRequest(conn net.Conn, resource string, config configMap) httpError {
 }
 
 func processResponse(conn net.Conn, respStatus httpResponse, mimeType string, respBytes []byte) {
-	fmt.Printf("responding with status/mime %v/%v\n", respStatus, mimeType)
+	log.Trace().Msgf("responding with status/mime %v/%v", respStatus, mimeType)
 
 	conn.Write([]byte(getStatusLine(respStatus)))
 	conn.Write([]byte(fmt.Sprint("Content-Type: ", mimeType, "\r\n")))
@@ -343,7 +340,7 @@ func processResponse(conn net.Conn, respStatus httpResponse, mimeType string, re
 }
 
 func processError(conn net.Conn, err httpError) {
-	fmt.Printf("responding with error %v\n", err)
+	log.Trace().Err(err).Msgf("responding with error")
 
 	conn.Write([]byte(getStatusLine(err)))
 	conn.Write([]byte("\r\n\r\n"))
