@@ -29,12 +29,18 @@ In all cases command-line args > config-file properties > default values.  See '
 - 'localhost' proxy support against single port per proxied
 - 'zerolog' logging
 
+### tag v0.0.2
+  - 'localhost' round-robin, cookie-based affinity, load-balancing
+  - folder/package restructuring
+
 ## Roadmap
 - .yml configuration alternative
 - Load balancing to proxied servers
-  - simple round-robin
-  - affinity with use of cookies
   - if no cookie (first-time requests) then cycle through ports after timeout
+  - other general timeout handling
+  - IP-based load-balancing alternative
+  - least-used strategy (alternative to round-robin)
+  - make IP-based and least-used configurable options
 - Timeout for connecting to proxied servers
   - add to config file
 - Orchestration support
