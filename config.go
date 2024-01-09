@@ -5,28 +5,32 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"github.com/rs/zerolog"
-    "github.com/rs/zerolog/log"
+	"strings"
+
 	"github.com/magiconair/properties"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
-type configMap struct {
+type configuration struct {
 	port          int
 	root          string
 	virtualHosts  map[string]string
-	proxyContexts map[string]int
-	logLevel 	  zerolog.Level
+	proxyContexts map[string][]int
+	logLevel      zerolog.Level
 }
 
 const (
-	DEFAULT_PORT   = 8080
-	DEFAULT_ROOT   = "root"
-	DEFAULT_CONFIG = "./config.properties"
+	DEFAULT_PORT      = 8080
+	DEFAULT_ROOT      = "root"
+	DEFAULT_CONFIG    = "./config.properties"
 	DEFAULT_LOG_LEVEL = zerolog.InfoLevel
 )
 
+var config configuration
+
 // command-line > properties > defaults
-func getConfig() configMap {
+func getConfig() configuration {
 	var port int
 	flag.IntVar(&port, "port", 0, "'port' must be an int")
 
@@ -56,7 +60,7 @@ func getConfig() configMap {
 		root = configProperties.GetString("root", DEFAULT_ROOT)
 	}
 	root, _ = filepath.Abs(root)
-	
+
 	if logLevel == "" {
 		logLevel = configProperties.GetString("logLevel", DEFAULT_LOG_LEVEL.String())
 	}
@@ -65,11 +69,11 @@ func getConfig() configMap {
 		log.Fatal().Err(zErr).Msgf("Invalid log level %v", logLevel)
 	}
 
-	config := configMap{
+	config = configuration{
 		port:          port,
 		root:          root,
 		virtualHosts:  make(map[string]string),
-		proxyContexts: make(map[string]int),
+		proxyContexts: make(map[string][]int),
 		logLevel:      zerologLevel,
 	}
 
@@ -77,12 +81,15 @@ func getConfig() configMap {
 		if string(key[0]) == "/" {
 			value := configProperties.GetString(key, "")
 			if string(value[0]) == ":" {
-				portNum, portErr := strconv.Atoi(value[1:])
-				if portErr != nil {
-					log.Fatal().Msgf("invalid port value for proxy-context in %v: %v'", configPath, value)
+				proxies := strings.Split(value, ",")
+				config.proxyContexts[key] = make([]int, len(proxies))
+				for pIdx, proxy := range proxies {
+					portNum, portErr := strconv.Atoi(proxy[1:])
+					if portErr != nil {
+						log.Fatal().Msgf("invalid port value for proxy-context in %v: %v'", configPath, value)
+					}
+					config.proxyContexts[key][pIdx] = portNum
 				}
-
-				config.proxyContexts[key] = portNum
 			} else {
 				config.virtualHosts[key] = value
 			}

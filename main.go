@@ -3,14 +3,14 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"mime"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-    "github.com/rs/zerolog/log"
+
+	"github.com/rs/zerolog/log"
 )
 
 func main() {
@@ -27,11 +27,11 @@ func main() {
 		if err != nil {
 			log.Fatal().Err(err).Msg("error accepting connection on socket")
 		}
-		go handleConnection(conn, config)
+		go handleConnection(conn)
 	}
 }
 
-func handleConnection(conn net.Conn, config configMap) {
+func handleConnection(conn net.Conn) {
 	defer conn.Close()
 
 	log.Info().Msgf("#handleConnection for %v", conn.RemoteAddr())
@@ -42,24 +42,25 @@ func handleConnection(conn net.Conn, config configMap) {
 			processError(conn, slErr)
 			break
 		}
-		proxyProcessed, pErr := doProxy(conn, startLine, config)
+		headers, hErr := parseHeaders(conn)
+		if hErr != nil {
+			processError(conn, hErr)
+			break
+		}
+
+		proxyProcessed, pErr := doProxy(conn, startLine, headers)
 		if pErr != nil {
 			processError(conn, pErr)
 			break
 		}
 		if !proxyProcessed {
-			headers, hErr := parseHeaders(conn)
-			if hErr != nil {
-				processError(conn, hErr)
-				break
-			}
 			_, bErr := parseBody(conn, headers)
 			if bErr != nil {
 				processError(conn, bErr)
 				break
 			}
 
-			rErr := doRequest(conn, startLine.resource, config)
+			rErr := doRequest(conn, startLine.resource)
 			if rErr != nil {
 				processError(conn, rErr)
 				break
@@ -122,64 +123,17 @@ func parseStartLine(conn net.Conn) (startLine, httpError) {
 		} else if nextChar == 10 {
 			break
 		} else {
-			buffer.Write(charBuf[:])
+			buffer.Write(charBuf)
 		}
 	}
 
-	log.Printf("parsed out start-line: %v", retVal)
+	log.Debug().Msgf("parsed out start-line: %v", retVal)
 	return retVal, nil
 }
 
-func parseHeaders(conn net.Conn) (map[string]string, httpError) {
-	log.Trace().Msg("#parseHeaders")
-	headerMap := make(map[string]string)
-
-	endOfHeaders := false
-	headerByte := make([]byte, 1)
-	buffer := bytes.NewBuffer(nil)
-
-	for {
-		_, readErr := conn.Read(headerByte)
-		if readErr != nil {
-			log.Error().Err(readErr).Msg("something happened reading from the header section")
-			return headerMap, newInternalServerErrorError(readErr.Error())
-		}
-
-		nextChar := headerByte[0]
-		if nextChar == 10 { // end of headers after 2nd CRLF
-			if endOfHeaders {
-				break
-			} else {
-				endOfHeaders = true
-			}
-		} else if nextChar == 13 { // at the end of the line (CR), parse out content and add to our header map
-			if !endOfHeaders { // this will be true on 2nd consecutive CRLF
-				headerRow := buffer.String()
-				headerSeparatorIdx := strings.Index(headerRow, ":")
-				if headerSeparatorIdx > 0 { // this will happen on 2nd CRLF
-					headerName := strings.ToLower(headerRow[0:headerSeparatorIdx]) // normalizing on lower-case in case header names are sent w/o case regard
-					headerValue := headerRow[headerSeparatorIdx+1:]
-
-					headerMap[headerName] = headerValue
-				}
-
-				buffer.Reset()
-			}
-		} else {
-			endOfHeaders = false // if we got a non-CRLF, we're still processing header content
-			buffer.Write(headerByte[0:1])
-		}
-	}
-
-	for hKey, hVal := range headerMap {
-		log.Trace().Msgf("header '%v'=%v", hKey, hVal)
-	}
-	return headerMap, nil
-}
-
-func parseBody(conn net.Conn, headers map[string]string) (string, httpError) {
+func parseBody(conn net.Conn, headers headers) ([]byte, httpError) {
 	log.Trace().Msg("#parseBody")
-	clHeader, clHeaderOK := headers["content-length"]
+	clHeader, clHeaderOK := headers.Value("Content-Length")
 	if clHeaderOK {
 		contentLength, clOk := strconv.Atoi(clHeader)
 		if clOk == nil {
@@ -189,97 +143,22 @@ func parseBody(conn net.Conn, headers map[string]string) (string, httpError) {
 			_, bodyErr := conn.Read(bodyBytes) // TODO: maybe check if bodyLen doesn't match cl
 			if bodyErr != nil {
 				log.Error().Err(bodyErr).Msg("something happened reading the body content")
-				return "", newInternalServerErrorError(bodyErr.Error())
+				return nil, newInternalServerErrorError(bodyErr.Error())
 			}
 
-			bodyContent := string(bodyBytes)
-			log.Printf("body: %v", bodyContent)
+			bodyContent := bodyBytes
+			// log.Trace().Msgf("body: %v", bodyContent)
 			return bodyContent, nil
 		}
 
 		log.Info().Msgf("invalid 'Content-Length' header value: %v", clHeader)
-		return "", newLengthRequiredError(clHeader)
+		return nil, newLengthRequiredError(clHeader)
 	} else {
-		return "", nil
+		return nil, nil
 	}
 }
 
-const (
-	READ_REQ_LEN   = 1024
-	READ_PROXY_LEN = 2048
-)
-
-func doProxy(conn net.Conn, startLine startLine, config configMap) (wasProcessed bool, err httpError) {
-	log.Trace().Msg("#doProxy")
-	resourceParts := strings.Split(startLine.resource, "/")
-	proxyRoot := "/" + resourceParts[1]
-	proxyPort, okpc := config.proxyContexts[proxyRoot]
-	if okpc {
-		log.Debug().Msgf("...%v proxying to port %v", proxyRoot, proxyPort)
-		proxyConn, pErr := net.Dial("tcp", fmt.Sprint("localhost:", proxyPort))
-		if pErr != nil {
-			return false, newInternalServerErrorError(pErr.Error())
-		}
-
-		log.Printf("...connected to proxy: %v", startLine.String(proxyRoot))
-		proxyConn.Write([]byte(startLine.String(proxyRoot)))
-		proxyConn.Write([]byte("\r\n"))
-
-		reqBytes := make([]byte, READ_REQ_LEN) // TODO: is 1K a good size for forwarding the request?  maybe larger on the response?
-		for {
-			log.Trace().Msg("...awaiting requestor bytes")
-			readNum, readErr := conn.Read(reqBytes)
-			if readErr != nil {
-				if err != io.EOF {
-					return false, newInternalServerErrorError(readErr.Error())
-				} else {
-					log.Trace().Msg("...reached end of proxied request")
-					break
-				}
-			}
-
-			log.Trace().Msgf("...writing %v bytes to proxy", string(reqBytes[0:readNum]))
-			_, writeErr := proxyConn.Write(reqBytes[0:readNum])
-			if writeErr != nil {
-				return false, newInternalServerErrorError(writeErr.Error())
-			}
-
-			if readNum < READ_REQ_LEN {
-				break
-			}
-		}
-
-		respBytes := make([]byte, READ_PROXY_LEN) // expect response to be larger, so 2k stream size?
-		for {
-			log.Trace().Msg("...awaiting proxy response")
-			readNum, readErr := proxyConn.Read(respBytes)
-			if readErr != nil {
-				if err != io.EOF {
-					return false, newInternalServerErrorError(readErr.Error())
-				} else {
-					break
-				}
-			}
-
-			log.Trace().Msgf("...writing %v proxied bytes back to requestor", string(respBytes[0:readNum]))
-			_, writeErr := conn.Write(respBytes[0:readNum])
-			if writeErr != nil {
-				return false, newInternalServerErrorError(writeErr.Error())
-			}
-
-			if readNum < READ_PROXY_LEN {
-				break
-			}
-		}
-
-		return true, nil
-	} else {
-		log.Trace().Msg("...no proxy configured")
-		return false, nil
-	}
-}
-
-func doRequest(conn net.Conn, resource string, config configMap) httpError {
+func doRequest(conn net.Conn, resource string) httpError {
 	log.Debug().Msgf("#doRequest for: %v", resource)
 
 	if len(resource) == 0 { // is this even possible?  i suppose it could be
